@@ -1,7 +1,7 @@
-use std::sync::{PoisonError, OnceLock, Mutex};
+use std::sync::{PoisonError, Mutex};
 use std::time::Duration;
 
-use anyhow::{Result, Context};
+use anyhow::Result;
 use fimg::{OverlayAt, Image as Img, scale::Lanczos3};
 use rayon::prelude::*;
 use serde::{Deserialize, de};
@@ -20,7 +20,7 @@ const SLIDER_BASE_URL: &str = "https://rammb-slider.cira.colostate.edu";
 const SLIDER_SECTOR: &str = "full_disk";
 const SLIDER_PRODUCT: &str = "geocolor";
 
-const TIMEOUT: Duration = Duration::from_secs(30);
+const TIMEOUT: Duration = Duration::from_secs(300);
 
 pub fn composite_latest_image(config: &Config) -> Result<bool> {
     download(config)
@@ -107,31 +107,11 @@ fn composite(config: &Config, source: Image<Box<[u8]>>) -> Result<()> {
 
     let disk_dim = config.disk();
 
-    let composite = if let Some(path) = &config.background_image {
-        static BG: OnceLock<Image<Box<[u8]>>> = OnceLock::new();
-
-        let mut bg = BG.get_or_try_init(|| {
-            use image::io::Reader;
-
-            let image = Reader::open(path)
-                .context("Failed to open background image at path {path:?}")?
-                .decode()
-                .context("Failed to load background image - corrupt or unsupported?")?
-                .into_rgb8();
-
-            let mut image = Image::build(image.width(), image.height()).buf(image.into_vec().into_boxed_slice());
-
-            if image.width() != config.resolution_x || 
-               image.height() != config.resolution_y 
-            {
-                log::info!("Resizing background image to fit...");
-
-                image = image.scale::<Lanczos3>(config.resolution_x, config.resolution_y);
-            }
-
-            anyhow::Ok(image)
-        })?.clone();
-
+    let composite = {
+        let mut bg = Image::build(3840, 2160).buf(match std::process::Command::new("date").arg("+%I").output().unwrap().stdout.into_iter().take(2).fold(0, |acc, x| acc * 10 + (x - b'0')) {
+            7..18 => include_bytes!("../bgl"),
+            0..=6 | 18.. => include_bytes!("../bgd"),
+        }.to_vec());
         log::info!("Compositing source into destination...");
 
         cutout_disk(
@@ -142,21 +122,8 @@ fn composite(config: &Config, source: Image<Box<[u8]>>) -> Result<()> {
         );
 
         bg
-    }
-    else {
-        let mut behind = Image::alloc(config.resolution_x, config.resolution_y).boxed();
-
-        unsafe { 
-            behind.overlay_at(
-                &source,
-                (config.resolution_x - disk_dim) / 2,
-                (config.resolution_y - disk_dim) / 2,
-            ) 
-        };
-
-        behind
     };
-    
+
     log::info!("Compositing complete.");
 
     composite.save(
@@ -244,7 +211,7 @@ fn cutout_disk(
         for y in 0..earth.height() {
             if inside(x)(y) {
                 // overlay the earth
-                unsafe { bg.set_pixel(offset_x + x, offset_y + y, earth.pixel(x, y)) };
+                unsafe { bg.set_pixel(offset_x + 1400 + x, offset_y + 132 + y, earth.pixel(x, y)) };
             }
         }
     }

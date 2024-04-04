@@ -1,4 +1,4 @@
-#![feature(once_cell_try, isqrt)]
+#![feature(once_cell_try, isqrt, exclusive_range_pattern)]
 
 mod config;
 mod slider;
@@ -8,20 +8,19 @@ use std::time::Duration;
 use std::thread::sleep;
 
 use anyhow::{Result, Context};
-use clap::Parser;
-
 use crate::config::*;
 
 const OUTPUT_NAME: &str = "satpaper_latest.png";
-const SLEEP_DURATION: Duration = Duration::from_secs(60);
-
+const SLEEP_DURATION: Duration = Duration::from_secs(120);
+mod logger;
 fn main() -> Result<()> {
     if std::env::var("RUST_LOG").is_err() {
         std::env::set_var("RUST_LOG", "info");
     }
-
-    env_logger::init();
     
+    logger::Logger::init(log::Level::Info);
+    // env_logger::init();
+
     update_wallpaper()
         .context("An error occurred in the wallpaper updating loop")?;
 
@@ -29,7 +28,13 @@ fn main() -> Result<()> {
 }
 
 fn update_wallpaper() -> Result<()> {
-    let config = Config::parse();
+    let config = Config {
+        satellite: Satellite::Himawari,
+        resolution_x: 1184,
+        resolution_y: 1184,
+        disk_size: 98,
+        target_path: std::env::var("HOME").unwrap().to_string().into(),
+    }; 
     
     let mut timestamp = None;
     
@@ -53,13 +58,9 @@ fn update_wallpaper() -> Result<()> {
             if slider::composite_latest_image(&config)? {
                 timestamp = Some(new);
 
-                if config.once {
-                    return Ok(());
-                }
-
                 wallpaper::set(
                     config.target_path.join(OUTPUT_NAME),
-                    config.wallpaper_command.as_deref(),
+                    None
                 )?;
 
                 log::info!("New wallpaper composited and set.");
@@ -87,9 +88,6 @@ mod tests {
             resolution_y: 1440,
             disk_size: 95,
             target_path: ".".into(),
-            wallpaper_command: None,
-            once: false,
-            background_image: None
         };
 
         slider::composite_latest_image(&config)?;
