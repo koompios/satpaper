@@ -6,7 +6,9 @@ use fimg::{OverlayAt, Image as Img, scale::Lanczos3};
 use rayon::prelude::*;
 use serde::{Deserialize, de};
 
-use ureq::AgentBuilder;
+use time::serde::iso8601;
+use time::OffsetDateTime;
+use ureq::{AgentBuilder, Response};
 
 use super::{
     Config,
@@ -108,22 +110,19 @@ fn composite(config: &Config, source: Image<Box<[u8]>>) -> Result<()> {
     let disk_dim = config.disk();
 
     let composite = {
-        let mut bg = Image::build(3840, 2160).buf(match std::process::Command::new("date").arg("+%I").output().unwrap().stdout.into_iter().take(2).fold(0, |acc, x| acc * 10 + (x - b'0')) {
-            7..18 => include_bytes!("../bgl"),
-            0..=6 | 18.. => include_bytes!("../bgd"),
-        }.to_vec());
+        let bg = bg();
+        let mut bg = Image::build(3840, 2160).buf(bg);
         log::info!("Compositing source into destination...");
 
         cutout_disk(
             bg.as_mut(),
             source.as_ref(),
             (config.resolution_x - disk_dim) / 2,
-            (config.resolution_y - disk_dim) / 2
+            (config.resolution_y - disk_dim) / 2,
         );
 
         bg
     };
-
     log::info!("Compositing complete.");
 
     composite.save(
@@ -311,4 +310,63 @@ impl Date {
 fn test_date_split() {
     assert_eq!(Date { date: 2023_10_26 }.split(), (2023, 10, 26));
     assert_eq!(Date { date: 2027_04_25 }.split(), (2027, 4, 25));
+}
+fn bg() -> Vec<u8> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        #[serde(deserialize_with = "iso8601::deserialize")]
+        sunrise: OffsetDateTime,
+        #[serde(deserialize_with = "iso8601::deserialize")]
+        sunset: OffsetDateTime,
+    }
+    ureq::get("https://api.sunrise-sunset.org/json")
+        .query_pairs([
+            ("lat", "11.53147930198993"),
+            ("lng", "104.86783031394549"),
+            ("formatted", "0"),
+            ("tzid", "Asia/Phnom_Penh"),
+        ])
+        .call()
+        .ok()
+        .map(Response::into_reader)
+        .and_then(|x| serde_json::from_reader(x).ok())
+        .and_then(|x: serde_json::Value| {
+            let Some("OK") = x.get("status").and_then(serde_json::Value::as_str) else {
+                return None;
+            };
+            let Some(Resp { sunrise, sunset }) = x
+                .get("results")
+                .and_then(|x| serde_json::from_value::<Resp>(x.clone()).ok())
+            else {
+                return None;
+            };
+            let now = time::OffsetDateTime::now_utc().to_offset(time_macros::offset!(+7));
+            Some(
+                (now < sunrise || now > sunset)
+                    .then_some(include_bytes!("../bgd"))
+                    .unwrap_or(include_bytes!("../bgl")),
+            )
+            .map(|x| x.to_vec())
+        })
+        .unwrap_or_else(|| {
+            match std::process::Command::new("date")
+                .arg("+%I")
+                .output()
+                .unwrap()
+                .stdout
+                .into_iter()
+                .take(2)
+                .fold(0, |acc, x| acc * 10 + (x - b'0'))
+            {
+                7..18 => include_bytes!("../bgl"),
+                0..=6 | 18.. => include_bytes!("../bgd"),
+            }
+            .to_vec()
+        })
+}
+
+
+#[test]
+fn h() {
+    bg();
 }
