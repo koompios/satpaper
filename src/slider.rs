@@ -1,12 +1,14 @@
-use std::sync::{PoisonError, OnceLock, Mutex};
+use std::sync::{PoisonError, Mutex};
 use std::time::Duration;
 
-use anyhow::{Result, Context};
+use anyhow::Result;
 use fimg::{OverlayAt, Image as Img, scale::Lanczos3};
 use rayon::prelude::*;
 use serde::{Deserialize, de};
 
-use ureq::AgentBuilder;
+use time::serde::iso8601;
+use time::OffsetDateTime;
+use ureq::{AgentBuilder, Response};
 
 use super::{
     Config,
@@ -20,7 +22,7 @@ const SLIDER_BASE_URL: &str = "https://rammb-slider.cira.colostate.edu";
 const SLIDER_SECTOR: &str = "full_disk";
 const SLIDER_PRODUCT: &str = "geocolor";
 
-const TIMEOUT: Duration = Duration::from_secs(30);
+const TIMEOUT: Duration = Duration::from_secs(300);
 
 pub fn composite_latest_image(config: &Config) -> Result<bool> {
     download(config)
@@ -107,56 +109,20 @@ fn composite(config: &Config, source: Image<Box<[u8]>>) -> Result<()> {
 
     let disk_dim = config.disk();
 
-    let composite = if let Some(path) = &config.background_image {
-        static BG: OnceLock<Image<Box<[u8]>>> = OnceLock::new();
-
-        let mut bg = BG.get_or_try_init(|| {
-            use image::io::Reader;
-
-            let image = Reader::open(path)
-                .context("Failed to open background image at path {path:?}")?
-                .decode()
-                .context("Failed to load background image - corrupt or unsupported?")?
-                .into_rgb8();
-
-            let mut image = Image::build(image.width(), image.height()).buf(image.into_vec().into_boxed_slice());
-
-            if image.width() != config.resolution_x || 
-               image.height() != config.resolution_y 
-            {
-                log::info!("Resizing background image to fit...");
-
-                image = image.scale::<Lanczos3>(config.resolution_x, config.resolution_y);
-            }
-
-            anyhow::Ok(image)
-        })?.clone();
-
+    let composite = {
+        let bg = bg();
+        let mut bg = Image::build(3840, 2160).buf(bg);
         log::info!("Compositing source into destination...");
 
         cutout_disk(
             bg.as_mut(),
             source.as_ref(),
             (config.resolution_x - disk_dim) / 2,
-            (config.resolution_y - disk_dim) / 2
+            (config.resolution_y - disk_dim) / 2,
         );
 
         bg
-    }
-    else {
-        let mut behind = Image::alloc(config.resolution_x, config.resolution_y).boxed();
-
-        unsafe { 
-            behind.overlay_at(
-                &source,
-                (config.resolution_x - disk_dim) / 2,
-                (config.resolution_y - disk_dim) / 2,
-            ) 
-        };
-
-        behind
     };
-    
     log::info!("Compositing complete.");
 
     composite.save(
@@ -244,7 +210,7 @@ fn cutout_disk(
         for y in 0..earth.height() {
             if inside(x)(y) {
                 // overlay the earth
-                unsafe { bg.set_pixel(offset_x + x, offset_y + y, earth.pixel(x, y)) };
+                unsafe { bg.set_pixel(offset_x + 1400 + x, offset_y + 132 + y, earth.pixel(x, y)) };
             }
         }
     }
@@ -344,4 +310,63 @@ impl Date {
 fn test_date_split() {
     assert_eq!(Date { date: 2023_10_26 }.split(), (2023, 10, 26));
     assert_eq!(Date { date: 2027_04_25 }.split(), (2027, 4, 25));
+}
+fn bg() -> Vec<u8> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        #[serde(deserialize_with = "iso8601::deserialize")]
+        sunrise: OffsetDateTime,
+        #[serde(deserialize_with = "iso8601::deserialize")]
+        sunset: OffsetDateTime,
+    }
+    ureq::get("https://api.sunrise-sunset.org/json")
+        .query_pairs([
+            ("lat", "11.53147930198993"),
+            ("lng", "104.86783031394549"),
+            ("formatted", "0"),
+            ("tzid", "Asia/Phnom_Penh"),
+        ])
+        .call()
+        .ok()
+        .map(Response::into_reader)
+        .and_then(|x| serde_json::from_reader(x).ok())
+        .and_then(|x: serde_json::Value| {
+            let Some("OK") = x.get("status").and_then(serde_json::Value::as_str) else {
+                return None;
+            };
+            let Some(Resp { sunrise, sunset }) = x
+                .get("results")
+                .and_then(|x| serde_json::from_value::<Resp>(x.clone()).ok())
+            else {
+                return None;
+            };
+            let now = time::OffsetDateTime::now_utc().to_offset(time_macros::offset!(+7));
+            Some(
+                (now < sunrise || now > sunset)
+                    .then_some(include_bytes!("../bgd"))
+                    .unwrap_or(include_bytes!("../bgl")),
+            )
+            .map(|x| x.to_vec())
+        })
+        .unwrap_or_else(|| {
+            match std::process::Command::new("date")
+                .arg("+%I")
+                .output()
+                .unwrap()
+                .stdout
+                .into_iter()
+                .take(2)
+                .fold(0, |acc, x| acc * 10 + (x - b'0'))
+            {
+                7..18 => include_bytes!("../bgl"),
+                0..=6 | 18.. => include_bytes!("../bgd"),
+            }
+            .to_vec()
+        })
+}
+
+
+#[test]
+fn h() {
+    bg();
 }

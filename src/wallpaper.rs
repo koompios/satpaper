@@ -145,7 +145,7 @@ fn set_kde(path: &str) -> Result<()> {
     let path = path.to_str().context("Failed to canonicalize the path")?;
 
     // adapted from https://superuser.com/questions/488232
-    Command::new("qdbus")
+    Command::new("qdbus6")
         .args([
             "org.kde.plasmashell",
             "/PlasmaShell",
